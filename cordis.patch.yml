@@ -1,0 +1,4 @@
+# dsh-inferhub-duo profile layer: mount the two cheapest InferHub routes.
+- insert:
+    - id: dsh-inferhub-duo
+      name: dsh-inferhub-duo

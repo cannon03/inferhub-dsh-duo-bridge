@@ -1,0 +1,14 @@
+# Local development settings for the dsh-inferhub-duo plugin checkout (pnpm 11
+# reads pnpm-specific settings from this file rather than .npmrc).
+#
+# - storeDir: sandbox-friendly store location for this checkout.
+# - nodeLinker: a flat node_modules keeps the harness symlinks created by
+#   `npm run link-dsh` in place and matches how the DSH profile installs plugins.
+# - autoInstallPeers: harness packages (`@deepseek-ai/*`) must resolve to the
+#   host's own copies, never to a registry install.
+storeDir: /home/developer/projects/.pnpm-store
+nodeLinker: hoisted
+autoInstallPeers: false
+allowBuilds:
+  # vitest pulls esbuild, whose install script links its platform binary.
+  esbuild: true
