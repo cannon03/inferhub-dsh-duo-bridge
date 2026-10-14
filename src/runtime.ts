@@ -31,6 +31,10 @@ import {
   sendJson as sendJsonImpl,
   sendMethodNotAllowed as sendMethodNotAllowedImpl,
 } from '../node_modules/dsh-inferhub/lib/routes.js';
+import {
+  NO_CAPACITY_CODE as NO_CAPACITY_CODE_IMPL,
+  NO_PROVIDER_UNDER_BID_CODE as NO_PROVIDER_UNDER_BID_CODE_IMPL,
+} from '../node_modules/dsh-inferhub/lib/errors.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- thin glue over built JS; behaviour is pinned by integration tests. */
 /** Re-exported runtime helpers, typed loosely: the built JS carries no declarations. */
@@ -47,6 +51,10 @@ export const resolveInferHubConfig: (...args: any[]) => any = resolveInferHubCon
 export const rejected: (...args: any[]) => any = rejectedImpl;
 export const sendJson: (...args: any[]) => any = sendJsonImpl;
 export const sendMethodNotAllowed: (...args: any[]) => any = sendMethodNotAllowedImpl;
+/** `402 no_provider_under_bid` machine code, for pool-failover classification. */
+export const NO_PROVIDER_UNDER_BID_CODE: string = NO_PROVIDER_UNDER_BID_CODE_IMPL;
+/** `503 no_capacity` machine code, for pool-failover classification. */
+export const NO_CAPACITY_CODE: string = NO_CAPACITY_CODE_IMPL;
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 /** How one route asks InferHub to pick capacity. */

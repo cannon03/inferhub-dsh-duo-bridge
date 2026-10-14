@@ -41,6 +41,7 @@ import {
 import type { AdapterGeneration, CatalogSnapshot, InferHubConfig, RouteSpec } from './runtime.ts';
 import { DUO_SETTINGS_NAMESPACE, MANAGEMENT_CALLS_PER_MINUTE, ORCHESTRATOR_PROFILE_ID, SUBAGENT_PROFILE_ID, Config, minViolatingPrefixes, resolveDuoConfig, toInferHubSettings } from './duo-config.ts';
 import type { DuoConfig, DuoSettings, MinFilterMember } from './duo-config.ts';
+import { PoolFailoverAdapter, poolViolatingPrefixes } from './pool.ts';
 
 /** Cordis function-plugin name. */
 export const name = 'dsh-inferhub-duo';
@@ -154,7 +155,7 @@ export function apply(ctx: Context, config: DuoSettings): void {
     },
   });
 
-  const adapter = new InferHubAdapter({
+  const inner = new InferHubAdapter({
     apiKey: resolveApiKey,
     generation: () => generation,
     client: clientFor,
@@ -162,6 +163,25 @@ export function apply(ctx: Context, config: DuoSettings): void {
     ledger,
     retryPolicy: () => retryPolicyOf(inferConfig()),
     log,
+  });
+
+  /** Last model that served each route, for the status surface. */
+  const lastServed = new Map<string, string>();
+  /** Configured pool (bare aliases, in walk order) for one provider route id. */
+  const poolFor = (routeId: string): readonly string[] => {
+    const duo = options();
+    if (routeId === `inferhub-${ORCHESTRATOR_PROFILE_ID}`) return duo.orchestratorPool;
+    if (routeId === `inferhub-${SUBAGENT_PROFILE_ID}`) return duo.subagentPool;
+    return [];
+  };
+  const adapter = new PoolFailoverAdapter({
+    inner,
+    poolFor,
+    eligibleModels: (routeId: string) => [...(generation.routes.get(routeId)?.models.keys() ?? [])],
+    log,
+    noteServed: (routeId: string, model: string) => {
+      lastServed.set(routeId, model);
+    },
   });
 
   /**
@@ -276,15 +296,15 @@ export function apply(ctx: Context, config: DuoSettings): void {
     for (const spec of specs) {
       const pair =
         spec.profileId === ORCHESTRATOR_PROFILE_ID
-          ? { alias: duo.orchestratorAlias, minIn: duo.orchestratorMinAskInput, minOut: duo.orchestratorMinAskOutput }
+          ? { aliases: duo.orchestratorPool.length > 0 ? duo.orchestratorPool : [duo.orchestratorAlias], minIn: duo.orchestratorMinAskInput, minOut: duo.orchestratorMinAskOutput }
           : spec.profileId === SUBAGENT_PROFILE_ID
-            ? { alias: duo.subagentAlias, minIn: duo.subagentMinAskInput, minOut: duo.subagentMinAskOutput }
+            ? { aliases: duo.subagentPool.length > 0 ? duo.subagentPool : [duo.subagentAlias], minIn: duo.subagentMinAskInput, minOut: duo.subagentMinAskOutput }
             : undefined;
       if (pair === undefined || spec.mode === 'upstream') continue;
-      const banned = minViolatingPrefixes(pair.alias, pair.minIn, pair.minOut, minFilterMembers(snapshot, pair.alias));
+      const banned = poolViolatingPrefixes(pair.aliases, pair.minIn, pair.minOut, (alias) => minFilterMembers(snapshot, alias));
       if (banned.length === 0) continue;
       spec.ignoreUpstreams = [...new Set([...spec.ignoreUpstreams, ...banned])];
-      log('warn', `minimum asks exclude ${banned.join(', ')} from ${spec.route} (${pair.alias})`);
+      log('warn', `minimum asks exclude ${banned.join(', ')} from ${spec.route} (${pair.aliases.join(', ')})`);
     }
   }
 
@@ -326,6 +346,11 @@ export function apply(ctx: Context, config: DuoSettings): void {
             sendJson(res, 200, {
               routes: lastSpecs.map((route) => describeRoute(route)),
               models: lastSpecs.flatMap((route) => route.models.map((model) => model.id)),
+              pools: {
+                'inferhub-orch': poolFor('inferhub-orch'),
+                'inferhub-sub': poolFor('inferhub-sub'),
+              },
+              activeModels: Object.fromEntries(lastServed),
               ceilings: cfg.ceilings,
               stale: snapshot === undefined ? true : snapshot.stale,
               spend: {

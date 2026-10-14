@@ -2,8 +2,9 @@
  * Configuration schema and normalization for the InferHub duo plugin.
  *
  * The duo plugin exposes exactly two cheapest routes — an orchestrator route
- * (`inferhub-orch`) and a subagent route (`inferhub-sub`) — each pinning one
- * configurable InferHub alias. The `Config` schema is the settings-namespace
+ * (`inferhub-orch`) and a subagent route (`inferhub-sub`) — each serving one
+ * configurable InferHub alias or, when set, an ordered pool of aliases walked
+ * until one serves. The `Config` schema is the settings-namespace
  * schema the plugin installs under `inferhub-duo`, so every field here is
  * user-editable at runtime through `settings.yaml`.
  *
@@ -46,10 +47,22 @@ export interface DuoSettings {
   contextWindowFallback?: number;
   /** InferHub alias pinned by the `inferhub-orch` route. */
   orchestratorAlias?: string;
+  /**
+   * Ordered fallback aliases for the `inferhub-orch` route. When non-empty,
+   * the route offers these in order and serves the first with capacity;
+   * empty means the single `orchestratorAlias`.
+   */
+  orchestratorPool?: string[];
   /** Provider display name for the orchestrator route. */
   orchestratorLabel?: string;
   /** InferHub alias pinned by the `inferhub-sub` route. */
   subagentAlias?: string;
+  /**
+   * Ordered fallback aliases for the `inferhub-sub` route. When non-empty,
+   * the route offers these in order and serves the first with capacity;
+   * empty means the single `subagentAlias`.
+   */
+  subagentPool?: string[];
   /** Provider display name for the subagent route. */
   subagentLabel?: string;
   /**
@@ -124,8 +137,10 @@ export interface DuoConfig {
   defaultMaxTokens: number;
   contextWindowFallback: number;
   orchestratorAlias: string;
+  orchestratorPool: string[];
   orchestratorLabel: string;
   subagentAlias: string;
+  subagentPool: string[];
   subagentLabel: string;
   orchestratorCeilings: PriceCeilings;
   subagentCeilings: PriceCeilings;
@@ -228,8 +243,10 @@ export const Config: z<DuoSettings> = z.object({
   defaultMaxTokens: z.natural().min(1).default(DEFAULT_MAX_TOKENS).description('Output cap materialized when a request omits one'),
   contextWindowFallback: z.natural().min(1).default(DEFAULT_CONTEXT_WINDOW).description('Context capacity assumed for models the catalogue does not size'),
   orchestratorAlias: z.string().default(DEFAULT_ORCHESTRATOR_ALIAS).description('InferHub alias the `inferhub-orch` route pins; served at its live cheapest floor'),
+  orchestratorPool: z.array(z.string()).default([]).description('Ordered fallback aliases for the orchestrator route; empty means the single orchestratorAlias'),
   orchestratorLabel: z.string().default(DEFAULT_ORCHESTRATOR_LABEL).description('Provider display name for the orchestrator route'),
   subagentAlias: z.string().default(DEFAULT_SUBAGENT_ALIAS).description('InferHub alias the `inferhub-sub` route pins; served at its live cheapest floor'),
+  subagentPool: z.array(z.string()).default([]).description('Ordered fallback aliases for the subagent route; empty means the single subagentAlias'),
   subagentLabel: z.string().default(DEFAULT_SUBAGENT_LABEL).description('Provider display name for the subagent route'),
   orchestratorCeilings: ceilingsSchema.description('Explicit ceilings for the orchestrator route: when set, the route runs constrained at these instead of floor-pinned cheapest'),
   subagentCeilings: ceilingsSchema.description('Explicit ceilings for the subagent route: when set, the route runs constrained at these instead of floor-pinned cheapest'),
@@ -327,6 +344,17 @@ export function normalizeUpstream(raw: string | undefined): string | undefined {
   return UPSTREAM_PATTERN.test(value) ? value : undefined;
 }
 
+/** Normalize an ordered alias pool: lowercase, trim, keep the wire shape, de-duplicate. */
+export function sanitizePool(values: readonly string[] | undefined): string[] {
+  if (values === undefined) return [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const value = (raw ?? '').trim().toLowerCase();
+    if (value.length > 0 && ALIAS_PATTERN.test(value)) seen.add(value);
+  }
+  return [...seen];
+}
+
 /** Drop non-finite and non-positive minimum asks; zero means "no minimum". */
 export function sanitizeMinAsk(value: number | undefined): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
@@ -403,8 +431,10 @@ export function resolveDuoConfig(raw: DuoSettings | undefined): DuoConfig {
     defaultMaxTokens: Math.max(1, Math.floor(stored.defaultMaxTokens ?? DEFAULT_MAX_TOKENS)),
     contextWindowFallback: Math.max(1, Math.floor(stored.contextWindowFallback ?? DEFAULT_CONTEXT_WINDOW)),
     orchestratorAlias: normalizeAlias(stored.orchestratorAlias, DEFAULT_ORCHESTRATOR_ALIAS),
+    orchestratorPool: sanitizePool(stored.orchestratorPool),
     orchestratorLabel: trimOr(stored.orchestratorLabel, DEFAULT_ORCHESTRATOR_LABEL),
     subagentAlias: normalizeAlias(stored.subagentAlias, DEFAULT_SUBAGENT_ALIAS),
+    subagentPool: sanitizePool(stored.subagentPool),
     subagentLabel: trimOr(stored.subagentLabel, DEFAULT_SUBAGENT_LABEL),
     orchestratorCeilings: sanitizeCeilings(stored.orchestratorCeilings),
     subagentCeilings: sanitizeCeilings(stored.subagentCeilings),
@@ -434,40 +464,42 @@ export function resolveDuoConfig(raw: DuoSettings | undefined): DuoConfig {
 /**
  * Map resolved duo settings onto the dsh-inferhub runtime's settings shape.
  *
- * Each route pins a single alias. An upstream pin turns the route into
- * `upstream` mode (`<prefix>/<alias>`, only that provider serves); otherwise
- * the auto flag selects `auto` (bare alias, InferHub fails over by itself),
- * explicit ceilings select `constrained`, and the default is `cheapest`
- * (ceilings pinned to the live floor).
+ * Each route serves one alias or, when set, an ordered pool of aliases. An
+ * upstream pin turns the route into `upstream` mode (`<prefix>/<alias>`, only
+ * that provider serves); otherwise the auto flag selects `auto` (bare alias,
+ * InferHub fails over by itself), explicit ceilings select `constrained`, and
+ * the default is `cheapest` (ceilings pinned to the live floor).
  */
 export function toInferHubSettings(duo: DuoConfig): InferHubSettings {
   const route = (
     id: string,
     label: string,
     alias: string,
+    pool: readonly string[],
     ceilings: PriceCeilings,
     auto: boolean,
     upstream: string | undefined,
   ): RoutingProfileSetting => {
+    const ids = pool.length > 0 ? [...pool] : [alias];
     if (upstream !== undefined) {
       return {
         id,
         label,
         mode: 'upstream',
         upstream,
-        modelIds: [`${upstream}/${alias}`],
+        modelIds: ids.map((model) => `${upstream}/${model}`),
         ...(Object.keys(ceilings).length > 0 ? { ceilings } : {}),
         enabled: true,
       };
     }
-    if (auto) return { id, label, mode: 'auto', modelIds: [alias], enabled: true };
+    if (auto) return { id, label, mode: 'auto', modelIds: ids, enabled: true };
     return Object.keys(ceilings).length > 0
-      ? { id, label, mode: 'constrained', modelIds: [alias], ceilings, enabled: true }
-      : { id, label, mode: 'cheapest', modelIds: [alias], enabled: true };
+      ? { id, label, mode: 'constrained', modelIds: ids, ceilings, enabled: true }
+      : { id, label, mode: 'cheapest', modelIds: ids, enabled: true };
   };
   const routingProfiles: RoutingProfileSetting[] = [
-    route(ORCHESTRATOR_PROFILE_ID, duo.orchestratorLabel, duo.orchestratorAlias, duo.orchestratorCeilings, duo.orchestratorAuto, duo.orchestratorUpstream),
-    route(SUBAGENT_PROFILE_ID, duo.subagentLabel, duo.subagentAlias, duo.subagentCeilings, duo.subagentAuto, duo.subagentUpstream),
+    route(ORCHESTRATOR_PROFILE_ID, duo.orchestratorLabel, duo.orchestratorAlias, duo.orchestratorPool, duo.orchestratorCeilings, duo.orchestratorAuto, duo.orchestratorUpstream),
+    route(SUBAGENT_PROFILE_ID, duo.subagentLabel, duo.subagentAlias, duo.subagentPool, duo.subagentCeilings, duo.subagentAuto, duo.subagentUpstream),
   ];
   return {
     apiKeyEnv: duo.apiKeyEnv,

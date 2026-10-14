@@ -27,6 +27,8 @@ export interface MockState {
   managementForbidden: boolean;
   /** SSE frames the inference endpoint writes; a `{...}` payload is wrapped in `data: `. */
   frames: string[];
+  /** Per-model inference failures, keyed by the request's `model` id. */
+  failModel: Record<string, { status: number; code?: string; message?: string }>;
 }
 
 /** A started mock, addressable by the plugin's `baseURL`. */
@@ -57,7 +59,7 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 
 /** Start the mock on an ephemeral port. */
 export async function startMockInferHub(): Promise<MockInferHub> {
-  const state: MockState = { requests: [], mode: 'ok', managementForbidden: false, frames: [] };
+  const state: MockState = { requests: [], mode: 'ok', managementForbidden: false, frames: [], failModel: {} };
   const server: Server = createServer((req, res) => {
     void (async () => {
       const path = new URL(String(req.url), 'http://localhost').pathname;
@@ -88,6 +90,11 @@ export async function startMockInferHub(): Promise<MockInferHub> {
         return;
       }
       if (path === '/v1/chat/completions') {
+        const fail = typeof body === 'object' && body !== null && 'model' in body ? state.failModel[String((body as { model?: unknown }).model)] : undefined;
+        if (fail !== undefined) {
+          json(res, fail.status, { error: { ...(fail.code === undefined ? {} : { code: fail.code }), message: fail.message ?? 'mock failure' } });
+          return;
+        }
         if (state.mode === 'bid') {
           json(res, 402, {
             error: { code: 'no_provider_under_bid', message: 'no provider under bid', min_input_per_mtok: 0.005, min_output_per_mtok: 0.02 },

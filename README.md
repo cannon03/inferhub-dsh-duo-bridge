@@ -70,8 +70,10 @@ optional; the resolved defaults are below.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `orchestratorAlias` | `glm-5.3` | InferHub alias the `inferhub-orch` route serves |
+| `orchestratorPool` | `[]` | Ordered fallback aliases for the orchestrator route; empty means the single `orchestratorAlias` |
 | `orchestratorLabel` | `InferHub Orchestrator` | Picker group name for the orchestrator route |
 | `subagentAlias` | `deepseek-v4.1-flash` | InferHub alias the `inferhub-sub` route serves |
+| `subagentPool` | `[]` | Ordered fallback aliases for the subagent route; empty means the single `subagentAlias` |
 | `subagentLabel` | `InferHub Subagent` | Picker group name for the subagent route |
 | `orchestratorCeilings` | `{}` (cheapest) | Explicit ceilings for the orchestrator route: when set, the route runs `constrained` at these instead of floor-pinned `cheapest` |
 | `subagentCeilings` | `{}` (cheapest) | Same, for the subagent route |
@@ -110,6 +112,17 @@ inferhub-duo:
 A malformed alias degrades to the default (the route keeps serving); a
 well-formed but unknown alias leaves that route empty rather than widening
 it to other models. Edits apply live — no restart.
+
+### Fallback pools
+
+When a pool is set, the route offers every member the catalogue carries and
+serves the first with capacity: the selected model is tried first, then the
+remaining members in pool order. Only capacity failures (bid, no-capacity,
+5xx, routing timeout, all pre-first-token) move to the next member; auth,
+budget, bad-request, abort, and mid-stream failures surface immediately.
+Unknown aliases are skipped with a warning, and minimum floors ban a prefix
+only when it serves no pool member cleanly. The status route reports the
+configured `pools` and the last `activeModels` served.
 
 ## Using the pair
 
