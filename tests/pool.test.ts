@@ -44,6 +44,7 @@ afterAll(async () => {
 
 afterEach(() => {
   mock.state.failModel = {};
+  mock.state.framesFor = {};
   mock.state.mode = 'ok';
 });
 
@@ -194,6 +195,29 @@ describe('pool failover walk', () => {
     expect(completions(since).map((body) => body.model)).toEqual(['deepseek-v4.1-flash']);
   });
 
+  it('fails over past a model that serves an empty response', async () => {
+    const harness = await boot({ subagentPool: ['deepseek-v4.1-flash', 'glm-5.3'] });
+    mock.state.framesFor = { 'deepseek-v4.1-flash': ['[DONE]'] };
+    okFrames('served-after-empty');
+    const since = mock.state.requests.length;
+    const chunks = await collect(harness.runtime.stream(call('inferhub-sub', 'deepseek-v4.1-flash', 's-pool-empty')));
+    expect(chunks.map((chunk) => chunk.type)).toEqual(['block-start', 'text-delta', 'block-end', 'usage', 'finish']);
+    expect(completions(since).map((body) => body.model)).toEqual(['deepseek-v4.1-flash', 'glm-5.3']);
+  });
+
+  it('reports the tried list when every member serves empty', async () => {
+    const harness = await boot({ subagentPool: ['deepseek-v4.1-flash', 'glm-5.3'] });
+    mock.state.framesFor = { 'deepseek-v4.1-flash': ['[DONE]'], 'glm-5.3': ['[DONE]'] };
+    const since = mock.state.requests.length;
+    const chunks = await collect(harness.runtime.stream(call('inferhub-sub', 'deepseek-v4.1-flash', 's-pool-allempty')));
+    const finish = chunks.at(-1);
+    expect(finish?.type).toBe('finish');
+    expect(JSON.stringify(finish)).toContain('tried');
+    expect(JSON.stringify(finish)).toContain('deepseek-v4.1-flash');
+    const models = completions(since).map((body) => body.model);
+    expect(models.slice(0, 2)).toEqual(['deepseek-v4.1-flash', 'glm-5.3']);
+  });
+
   it('merges minimum floors across pool members without starving either', async () => {
     const harness = await boot({ subagentPool: ['deepseek-v4.1-flash', 'glm-5.3'], subagentMinAskInput: 0.01, subagentMinAskOutput: 0.01 });
     okFrames('floored');
@@ -269,6 +293,10 @@ describe('pool walk semantics', () => {
     return { type: 'text-delta', index: 0, text };
   }
 
+  function errorFinishChunk(code: string, message: string): StreamChunk {
+    return { type: 'finish', reason: { kind: 'error', failure: { message, code } } };
+  }
+
   function baseOptions(model: string): GenerateOptions {
     return {
       provider: 'inferhub-sub',
@@ -323,6 +351,42 @@ describe('pool walk semantics', () => {
     const iterator = adapter.stream(baseOptions('a'))[Symbol.asyncIterator]();
     const caught = await iterator.next().catch((error: unknown) => error);
     expect(caught).toBe(failure);
+    expect(calls).toEqual(['a']);
+  });
+
+  it('continues past an empty-response finish to the next member', async () => {
+    const { adapter, calls, served } = walkWith(['a', 'b'], ['a', 'b'], {
+      a: { chunks: [errorFinishChunk('EMPTY_RESPONSE', 'no content')] },
+      b: { chunks: [textChunk('bee')] },
+    });
+    const chunks: StreamChunk[] = [];
+    for await (const chunk of adapter.stream(baseOptions('a'))) chunks.push(chunk);
+    expect(chunks).toEqual([textChunk('bee')]);
+    expect(calls).toEqual(['a', 'b']);
+    expect(served).toEqual([['inferhub-sub', 'b']]);
+  });
+
+  it('passes through an error finish with an unknown code', async () => {
+    const terminal = errorFinishChunk('FUTURE_CODE', 'future failure');
+    const { adapter, calls } = walkWith(['a', 'b'], ['a', 'b'], {
+      a: { chunks: [terminal] },
+      b: { chunks: [textChunk('bee')] },
+    });
+    const chunks: StreamChunk[] = [];
+    for await (const chunk of adapter.stream(baseOptions('a'))) chunks.push(chunk);
+    expect(chunks).toEqual([terminal]);
+    expect(calls).toEqual(['a']);
+  });
+
+  it('passes through an error finish after content already streamed', async () => {
+    const terminal = errorFinishChunk('EMPTY_RESPONSE', 'late empty');
+    const { adapter, calls } = walkWith(['a', 'b'], ['a', 'b'], {
+      a: { chunks: [textChunk('partial'), terminal] },
+      b: { chunks: [textChunk('bee')] },
+    });
+    const chunks: StreamChunk[] = [];
+    for await (const chunk of adapter.stream(baseOptions('a'))) chunks.push(chunk);
+    expect(chunks).toEqual([textChunk('partial'), terminal]);
     expect(calls).toEqual(['a']);
   });
 });

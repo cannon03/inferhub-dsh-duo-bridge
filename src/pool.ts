@@ -11,9 +11,10 @@
  *
  * @module dsh-inferhub-duo/pool
  */
-import { LlmError } from '@deepseek-ai/dsh-llm';
+import { EMPTY_RESPONSE_CODE, LlmError } from '@deepseek-ai/dsh-llm';
 import type {
   GenerateOptions,
+  LlmFailure,
   LlmImageRequestPricing,
   LlmModelInfo,
   LlmProviderInfo,
@@ -28,6 +29,8 @@ import type { MinFilterMember } from './duo-config.ts';
 
 /** Failure codes that mean "try the next pool member": bid, capacity, 5xx, routing timeout. */
 const ROUTABLE_CODES: ReadonlySet<string> = new Set([NO_PROVIDER_UNDER_BID_CODE, NO_CAPACITY_CODE, 'SERVER', 'TIMEOUT']);
+/** Terminal error finishes that fail over like capacity failures: a served-but-empty response. */
+const FAILOVER_FINISH_CODES: ReadonlySet<string> = new Set([...ROUTABLE_CODES, EMPTY_RESPONSE_CODE]);
 
 /** Read the machine code off a thrown failure without parsing its message. */
 function errorCodeOf(error: unknown): string {
@@ -36,6 +39,17 @@ function errorCodeOf(error: unknown): string {
     if (typeof code === 'string' && code.length > 0) return code;
   }
   return 'UNKNOWN';
+}
+
+/** A terminal error finish delivered as a chunk (served, but failed). */
+function errorFinishOf(chunk: StreamChunk): LlmFailure | undefined {
+  if (chunk.type !== 'finish') return undefined;
+  const reason = chunk.reason as { kind?: unknown; failure?: unknown } | undefined;
+  if (typeof reason !== 'object' || reason === null || reason.kind !== 'error') return undefined;
+  const failure = reason.failure as { message?: unknown; code?: unknown } | undefined;
+  if (typeof failure !== 'object' || failure === null) return undefined;
+  if (typeof failure.message !== 'string' || typeof failure.code !== 'string') return undefined;
+  return { message: failure.message, code: failure.code };
 }
 
 /** Structural surface of the wrapped sibling adapter used by the walk. */
@@ -132,11 +146,30 @@ export class PoolFailoverAdapter {
     const tried: { model: string; code: string; message: string }[] = [];
     for (const candidate of list) {
       let yielded = false;
+      let content = false;
+      let swallowed = false;
       try {
         for await (const chunk of this.deps.inner.stream({ ...base, model: candidate })) {
           yielded = true;
+          const terminalError = errorFinishOf(chunk);
+          if (terminalError !== undefined) {
+            if (!content && FAILOVER_FINISH_CODES.has(terminalError.code)) {
+              tried.push({ model: candidate, code: terminalError.code, message: terminalError.message });
+              this.deps.log('warn', `pool failover on ${route}: ${candidate} returned no content (${terminalError.code}), trying next`);
+              swallowed = true;
+              break;
+            }
+            yield chunk;
+            return;
+          }
+          if (chunk.type !== 'usage' && chunk.type !== 'finish') content = true;
           yield chunk;
+          if (chunk.type === 'finish') {
+            if ((chunk.reason as { kind?: unknown }).kind !== 'aborted') this.deps.noteServed(route, candidate);
+            return;
+          }
         }
+        if (swallowed) continue;
         this.deps.noteServed(route, candidate);
         return;
       } catch (error) {

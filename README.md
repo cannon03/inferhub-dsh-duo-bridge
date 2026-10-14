@@ -120,6 +120,9 @@ serves the first with capacity: the selected model is tried first, then the
 remaining members in pool order. Only capacity failures (bid, no-capacity,
 5xx, routing timeout, all pre-first-token) move to the next member; auth,
 budget, bad-request, abort, and mid-stream failures surface immediately.
+A served-but-empty response (`EMPTY_RESPONSE` with no content delivered)
+fails over the same way; an error finish after content, or with an unknown
+code, passes through untouched.
 Unknown aliases are skipped with a warning, and minimum floors ban a prefix
 only when it serves no pool member cleanly. The status route reports the
 configured `pools` and the last `activeModels` served.

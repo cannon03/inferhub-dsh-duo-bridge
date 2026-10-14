@@ -27,6 +27,8 @@ export interface MockState {
   managementForbidden: boolean;
   /** SSE frames the inference endpoint writes; a `{...}` payload is wrapped in `data: `. */
   frames: string[];
+  /** Per-model SSE frames, keyed by the request's `model` id; falls back to `frames`. */
+  framesFor: Record<string, string[]>;
   /** Per-model inference failures, keyed by the request's `model` id. */
   failModel: Record<string, { status: number; code?: string; message?: string }>;
 }
@@ -59,7 +61,7 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 
 /** Start the mock on an ephemeral port. */
 export async function startMockInferHub(): Promise<MockInferHub> {
-  const state: MockState = { requests: [], mode: 'ok', managementForbidden: false, frames: [], failModel: {} };
+  const state: MockState = { requests: [], mode: 'ok', managementForbidden: false, frames: [], failModel: {}, framesFor: {} };
   const server: Server = createServer((req, res) => {
     void (async () => {
       const path = new URL(String(req.url), 'http://localhost').pathname;
@@ -102,7 +104,9 @@ export async function startMockInferHub(): Promise<MockInferHub> {
           return;
         }
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' });
-        for (const frame of state.frames) res.write(frame.startsWith('{') || frame.startsWith('[') ? `data: ${frame}\n\n` : frame);
+        const model = typeof body === 'object' && body !== null && 'model' in body ? String((body as { model?: unknown }).model) : '';
+        const frames = state.framesFor[model] ?? state.frames;
+        for (const frame of frames) res.write(frame.startsWith('{') || frame.startsWith('[') ? `data: ${frame}\n\n` : frame);
         res.end();
         return;
       }
