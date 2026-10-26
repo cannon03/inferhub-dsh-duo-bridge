@@ -1,10 +1,11 @@
 /**
  * Configuration schema and normalization for the InferHub duo plugin.
  *
- * The duo plugin exposes exactly two cheapest routes — an orchestrator route
+ * The duo plugin exposes two configurable alias routes — an orchestrator route
  * (`inferhub-orch`) and a subagent route (`inferhub-sub`) — each serving one
  * configurable InferHub alias or, when set, an ordered pool of aliases walked
- * until one serves. The `Config` schema is the settings-namespace
+ * until one serves, plus a separate `inferhub-cb` route pinned to one upstream.
+ * The `Config` schema is the settings-namespace
  * schema the plugin installs under `inferhub-duo`, so every field here is
  * user-editable at runtime through `settings.yaml`.
  *
@@ -65,6 +66,15 @@ export interface DuoSettings {
   subagentPool?: string[];
   /** Provider display name for the subagent route. */
   subagentLabel?: string;
+  /**
+   * Alias served by the separate `inferhub-cb` route, pinned to one upstream.
+   * Defaults to `kimi-k3.1-pro` on `cb`.
+   */
+  cbAlias?: string;
+  /** Upstream prefix the `inferhub-cb` route is pinned to. */
+  cbUpstream?: string;
+  /** Provider display name for the `inferhub-cb` route. */
+  cbLabel?: string;
   /**
    * Explicit ceilings for the orchestrator route. When set (any dimension),
    * the route runs `constrained` at these ceilings instead of floor-pinned
@@ -142,6 +152,9 @@ export interface DuoConfig {
   subagentAlias: string;
   subagentPool: string[];
   subagentLabel: string;
+  cbAlias: string;
+  cbUpstream: string;
+  cbLabel: string;
   orchestratorCeilings: PriceCeilings;
   subagentCeilings: PriceCeilings;
   orchestratorAuto: boolean;
@@ -196,10 +209,18 @@ export const DEFAULT_ORCHESTRATOR_LABEL = 'InferHub Orchestrator';
 export const DEFAULT_SUBAGENT_ALIAS = 'deepseek-v4.1-flash';
 /** Default subagent provider label. */
 export const DEFAULT_SUBAGENT_LABEL = 'InferHub Subagent';
+/** Default model behind the `inferhub-cb` route. */
+export const DEFAULT_CB_ALIAS = 'kimi-k3.1-pro';
+/** Default upstream prefix the `inferhub-cb` route pins. */
+export const DEFAULT_CB_UPSTREAM = 'cb';
+/** Default `inferhub-cb` provider label. */
+export const DEFAULT_CB_LABEL = 'InferHub CB';
 /** Profile id behind the `inferhub-orch` route. */
 export const ORCHESTRATOR_PROFILE_ID = 'orch';
 /** Profile id behind the `inferhub-sub` route. */
 export const SUBAGENT_PROFILE_ID = 'sub';
+/** Profile id behind the `inferhub-cb` route. */
+export const CB_PROFILE_ID = 'cb';
 /** Management API calls allowed per minute (the account bucket is 30/min shared with MCP). */
 export const MANAGEMENT_CALLS_PER_MINUTE = 20;
 /** Aliases accepted on the wire: lowercase, dot/dash/underscore separators. */
@@ -248,6 +269,9 @@ export const Config: z<DuoSettings> = z.object({
   subagentAlias: z.string().default(DEFAULT_SUBAGENT_ALIAS).description('InferHub alias the `inferhub-sub` route pins; served at its live cheapest floor'),
   subagentPool: z.array(z.string()).default([]).description('Ordered fallback aliases for the subagent route; empty means the single subagentAlias'),
   subagentLabel: z.string().default(DEFAULT_SUBAGENT_LABEL).description('Provider display name for the subagent route'),
+  cbAlias: z.string().default(DEFAULT_CB_ALIAS).description('InferHub alias the separate `inferhub-cb` route serves, pinned to cbUpstream'),
+  cbUpstream: z.string().default(DEFAULT_CB_UPSTREAM).description('Upstream prefix the `inferhub-cb` route is pinned to (default cb)'),
+  cbLabel: z.string().default(DEFAULT_CB_LABEL).description('Provider display name for the `inferhub-cb` route'),
   orchestratorCeilings: ceilingsSchema.description('Explicit ceilings for the orchestrator route: when set, the route runs constrained at these instead of floor-pinned cheapest'),
   subagentCeilings: ceilingsSchema.description('Explicit ceilings for the subagent route: when set, the route runs constrained at these instead of floor-pinned cheapest'),
   orchestratorAuto: z.boolean().default(false).description('Run the orchestrator route in auto mode (bare alias, InferHub fails over to pricier tiers); overrides orchestratorCeilings'),
@@ -436,6 +460,9 @@ export function resolveDuoConfig(raw: DuoSettings | undefined): DuoConfig {
     subagentAlias: normalizeAlias(stored.subagentAlias, DEFAULT_SUBAGENT_ALIAS),
     subagentPool: sanitizePool(stored.subagentPool),
     subagentLabel: trimOr(stored.subagentLabel, DEFAULT_SUBAGENT_LABEL),
+    cbAlias: normalizeAlias(stored.cbAlias, DEFAULT_CB_ALIAS),
+    cbUpstream: normalizeUpstream(stored.cbUpstream) ?? DEFAULT_CB_UPSTREAM,
+    cbLabel: trimOr(stored.cbLabel, DEFAULT_CB_LABEL),
     orchestratorCeilings: sanitizeCeilings(stored.orchestratorCeilings),
     subagentCeilings: sanitizeCeilings(stored.subagentCeilings),
     orchestratorAuto: stored.orchestratorAuto === true,
@@ -500,6 +527,7 @@ export function toInferHubSettings(duo: DuoConfig): InferHubSettings {
   const routingProfiles: RoutingProfileSetting[] = [
     route(ORCHESTRATOR_PROFILE_ID, duo.orchestratorLabel, duo.orchestratorAlias, duo.orchestratorPool, duo.orchestratorCeilings, duo.orchestratorAuto, duo.orchestratorUpstream),
     route(SUBAGENT_PROFILE_ID, duo.subagentLabel, duo.subagentAlias, duo.subagentPool, duo.subagentCeilings, duo.subagentAuto, duo.subagentUpstream),
+    route(CB_PROFILE_ID, duo.cbLabel, duo.cbAlias, [], {}, false, duo.cbUpstream),
   ];
   return {
     apiKeyEnv: duo.apiKeyEnv,

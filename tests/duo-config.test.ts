@@ -24,6 +24,9 @@ describe('resolveDuoConfig', () => {
     expect(config.subagentAlias).toBe('deepseek-v4.1-flash');
     expect(config.orchestratorLabel).toBe('InferHub Orchestrator');
     expect(config.subagentLabel).toBe('InferHub Subagent');
+    expect(config.cbAlias).toBe('kimi-k3.1-pro');
+    expect(config.cbUpstream).toBe('cb');
+    expect(config.cbLabel).toBe('InferHub CB');
   });
 
   it('fills transport and guard defaults', () => {
@@ -60,13 +63,31 @@ describe('normalizeAlias', () => {
 });
 
 describe('toInferHubSettings', () => {
-  it('maps onto exactly two cheapest profiles with per-upstream routes off', () => {
+  it('maps onto two cheapest alias profiles plus a pinned CB profile', () => {
     const settings = toInferHubSettings(resolveDuoConfig({}));
     expect(settings.upstreamRoutes).toBe('off');
     expect(settings.routingProfiles).toEqual([
       { id: 'orch', label: 'InferHub Orchestrator', mode: 'cheapest', modelIds: ['glm-5.3'], enabled: true },
       { id: 'sub', label: 'InferHub Subagent', mode: 'cheapest', modelIds: ['deepseek-v4.1-flash'], enabled: true },
+      { id: 'cb', label: 'InferHub CB', mode: 'upstream', upstream: 'cb', modelIds: ['cb/kimi-k3.1-pro'], enabled: true },
     ]);
+  });
+
+  it('pins the CB route to its configured alias and upstream', () => {
+    const settings = toInferHubSettings(resolveDuoConfig({ cbAlias: 'kimi-k3', cbUpstream: 'CB/', cbLabel: 'Kimi' }));
+    expect(settings.routingProfiles?.[2]).toEqual({
+      id: 'cb',
+      label: 'Kimi',
+      mode: 'upstream',
+      upstream: 'cb',
+      modelIds: ['cb/kimi-k3'],
+      enabled: true,
+    });
+  });
+
+  it('falls back on a malformed CB alias or upstream', () => {
+    const settings = toInferHubSettings(resolveDuoConfig({ cbAlias: 'has space', cbUpstream: 'bad prefix!' }));
+    expect(settings.routingProfiles?.[2]).toMatchObject({ id: 'cb', upstream: 'cb', modelIds: ['cb/kimi-k3.1-pro'] });
   });
 
   it('carries custom aliases and labels through', () => {

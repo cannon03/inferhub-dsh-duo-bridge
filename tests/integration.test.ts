@@ -115,10 +115,14 @@ async function readStatus(harness: Harness): Promise<Record<string, unknown>> {
 }
 
 describe('duo plugin boot', () => {
-  it('registers exactly the orchestrator and subagent routes', async () => {
+  it('registers the orchestrator, subagent and CB routes', async () => {
     const harness = await boot();
-    expect(harness.runtime.listProviders().map((provider) => provider.id)).toEqual(['inferhub-orch', 'inferhub-sub']);
-    expect(harness.runtime.listProviders().map((provider) => provider.name)).toEqual(['InferHub Orchestrator', 'InferHub Subagent']);
+    expect(harness.runtime.listProviders().map((provider) => provider.id)).toEqual(['inferhub-orch', 'inferhub-sub', 'inferhub-cb']);
+    expect(harness.runtime.listProviders().map((provider) => provider.name)).toEqual([
+      'InferHub Orchestrator',
+      'InferHub Subagent',
+      'InferHub CB',
+    ]);
   });
 
   it('lists exactly one cheapest alias per route, pinned to its live floor', async () => {
@@ -196,13 +200,30 @@ describe('duo plugin boot', () => {
     expect(sent.headers['x-max-output-price']).toBe('0.0044');
   });
 
-  it('reports both routes from the status route', async () => {
+  it('serves the CB-pinned model on its own route', async () => {
+    mock.state.mode = 'ok';
+    mock.state.frames = [
+      '{"choices":[{"delta":{"content":"kimi"}}]}',
+      '{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1},"upstream_label":"CodeBuddy"}',
+      '[DONE]',
+    ];
+    const harness = await boot();
+    const listed = await harness.runtime.listModels('inferhub-cb');
+    expect(listed.map((model) => model.id)).toEqual(['cb/kimi-k3.1-pro']);
+    const chunks = await collect(harness.runtime.stream(call('inferhub-cb', 'cb/kimi-k3.1-pro', 's-duo-cb')));
+    expect(chunks.map((chunk) => chunk.type)).toEqual(['block-start', 'text-delta', 'block-end', 'usage', 'finish']);
+    const sent = mock.state.requests.filter((request) => request.path === '/v1/chat/completions').at(-1)!;
+    expect(sent.body).toMatchObject({ model: 'cb/kimi-k3.1-pro' });
+    expect(sent.headers['x-ignore-upstream']).toBeUndefined();
+  });
+
+  it('reports all three routes from the status route', async () => {
     const harness = await boot();
     await harness.runtime.listModels('inferhub-orch');
     expect([...harness.mounted.keys()]).toEqual([STATUS_PATH]);
     const status = await readStatus(harness);
-    expect((status.routes as { route: string }[]).map((route) => route.route)).toEqual(['inferhub-orch', 'inferhub-sub']);
-    expect(status.models).toEqual(['glm-5.3', 'deepseek-v4.1-flash']);
+    expect((status.routes as { route: string }[]).map((route) => route.route)).toEqual(['inferhub-orch', 'inferhub-sub', 'inferhub-cb']);
+    expect(status.models).toEqual(['glm-5.3', 'deepseek-v4.1-flash', 'cb/kimi-k3.1-pro']);
     expect(status.stale).toBe(false);
   });
 

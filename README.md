@@ -24,7 +24,7 @@ catalogue refresh.
 npm install          # dev dependencies + the sibling dsh-inferhub checkout
 npm run link-dsh     # symlink @deepseek-ai/* from the harness anchor (single-instance rule)
 npm run build        # tsc → lib/*.js
-npm test             # 16 tests: config mapping + boot integration vs a mock InferHub
+npm test             # 56 tests: config mapping + boot integration vs a mock InferHub
 
 # into the web profile (NOT enabled yet — say the word and I'll add it)
 dsh plugin --profile web add /home/developer/projects/typescript/dsh-inferhub-duo
@@ -75,6 +75,9 @@ optional; the resolved defaults are below.
 | `subagentAlias` | `deepseek-v4.1-flash` | InferHub alias the `inferhub-sub` route serves |
 | `subagentPool` | `[]` | Ordered fallback aliases for the subagent route; empty means the single `subagentAlias` |
 | `subagentLabel` | `InferHub Subagent` | Picker group name for the subagent route |
+| `cbAlias` | `kimi-k3.1-pro` | InferHub alias the `inferhub-cb` route serves |
+| `cbUpstream` | `cb` | Upstream prefix the `inferhub-cb` route is pinned to |
+| `cbLabel` | `InferHub CB` | Picker group name for the `inferhub-cb` route |
 | `orchestratorCeilings` | `{}` (cheapest) | Explicit ceilings for the orchestrator route: when set, the route runs `constrained` at these instead of floor-pinned `cheapest` |
 | `subagentCeilings` | `{}` (cheapest) | Same, for the subagent route |
 | `orchestratorAuto` | `false` | Run the orchestrator route in `auto` (bare alias, InferHub fails over by itself); overrides ceilings |
@@ -85,19 +88,23 @@ optional; the resolved defaults are below.
 | `baseURL` | `https://api.inferhub.dev` | Inference base (OpenAI chat-completions) |
 | `managementURL` | `https://inferhub.dev/api` | Management base (`/catalog`, `/combos`, …) |
 | `catalogTtlSeconds` | `300` | Catalogue cache lifetime (minimum 30) |
-| `ignoreUpstreams` | `[]` | Upstream prefixes excluded from both routes |
+| `ignoreUpstreams` | `[]` | Upstream prefixes excluded from every route |
 | `ceilings` / `modelCeilings` | `{}` | Extra ceilings; tightest wins, never loosens `cheapest` |
 | `budgets` | `{warnPercent: 0.8, enforce: true}` | Local spending guard |
 
 No per-upstream routes are generated (`upstreamRoutes` is forced `off`):
-this plugin is exactly two routes, nothing more.
+this plugin exposes exactly three routes, nothing more. `inferhub-orch` and
+`inferhub-sub` are the two configurable alias routes; `inferhub-cb` is a
+separate upstream-pinned route serving `cb/kimi-k3.1-pro` only. Because that
+route is `upstream`, it bypasses alias floors and the pool minimum filter, so
+it cannot leak the cb upstream's cheaper tiers into the other routes.
 
 ### Keys without management scope
 
 If your key answers InferHub's management surface (`/catalog`, `/combos`,
 `/budgets/aliases`) with 403, the plugin degrades instead of blanking the
 picker: alias floors and ladders are derived from the member rows
-`GET /v1/models` itself carries, so both routes stay floor-pinned. This is
+`GET /v1/models` itself carries, so both alias routes stay floor-pinned. This is
 covered by the `managementForbidden` integration test.
 
 ```yaml
@@ -131,7 +138,8 @@ configured `pools` and the last `activeModels` served.
 
 Pick per session in the model picker (`InferHub Orchestrator → GLM 5.3` for
 the loop, `InferHub Subagent → DeepSeek V4.1 Flash` for dispatched
-subagents), or pin the loop default in the profile:
+subagents, `InferHub CB → Kimi K3.1 Pro` for the cb-pinned tab), or pin the
+loop default in the profile:
 
 ```
 - id: agent-default-model
@@ -145,11 +153,11 @@ subagents), or pin the loop default in the profile:
 
 ```bash
 npm run typecheck    # tsc --noEmit, clean
-npm test             # vitest, 16 tests green
+npm test             # vitest, 56 tests green
 ```
 
 After installing into a profile, `GET /dsh-inferhub-duo/status` (same-origin,
-behind the composition's Host/Origin fence) reports both routes, their
+behind the composition's Host/Origin fence) reports all three routes, their
 models, the ceilings in force, catalogue staleness, and local spend. The
 path is deliberately off `/dsh-inferhub/*` so the two plugins never collide.
 
@@ -157,7 +165,7 @@ path is deliberately off `/dsh-inferhub/*` so the two plugins never collide.
 
 | Path | Contents |
 | --- | --- |
-| `src/index.ts` | Plugin entry: two cheapest routes, settings section, status route |
+| `src/index.ts` | Plugin entry: orchestrator/subagent alias routes plus the cb-pinned route, settings section, status route |
 | `src/duo-config.ts` | Duo settings schema, normalization, mapping to runtime settings |
 | `src/runtime.ts` | Single seam onto the `dsh-inferhub` runtime (values) + local type mirror |
 | `tests/` | Config unit tests + boot integration vs a mock InferHub |
