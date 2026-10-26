@@ -13,7 +13,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
-import LlmRuntime, { createUserMessage } from '@deepseek-ai/dsh-llm';
+import LlmRuntime, { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm';
 import * as fileSettings from '@deepseek-ai/dsh-settings-file';
 import type {} from '@deepseek-ai/dsh-settings';
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
@@ -215,6 +215,31 @@ describe('duo plugin boot', () => {
     const sent = mock.state.requests.filter((request) => request.path === '/v1/chat/completions').at(-1)!;
     expect(sent.body).toMatchObject({ model: 'cb/kimi-k3.1-pro' });
     expect(sent.headers['x-ignore-upstream']).toBeUndefined();
+  });
+
+  it('strips thinking-only assistant turns before the wire', async () => {
+    mock.state.mode = 'ok';
+    mock.state.frames = [
+      '{"choices":[{"delta":{"content":"ok"}}]}',
+      '{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1},"upstream_label":"CodeBuddy"}',
+      '[DONE]',
+    ];
+    const harness = await boot();
+    const options = {
+      ...call('inferhub-cb', 'cb/kimi-k3.1-pro', 's-duo-cb-clean'),
+      messages: [
+        createUserMessage({ content: [{ type: 'text', text: 'first' }], source: { kind: 'user' } }),
+        createAssistantMessage({
+          content: [{ type: 'reasoning', text: 'thinking only' }],
+          source: { provider: 'inferhub-cb', model: 'cb/kimi-k3.1-pro' },
+        }),
+        createUserMessage({ content: [{ type: 'text', text: 'continue' }], source: { kind: 'user' } }),
+      ],
+    };
+    await collect(harness.runtime.stream(options));
+    const sent = mock.state.requests.filter((request) => request.path === '/v1/chat/completions').at(-1)!;
+    const messages = (sent.body as { messages: { role: string }[] }).messages;
+    expect(messages.map((message) => message.role)).toEqual(['user', 'user']);
   });
 
   it('reports all three routes from the status route', async () => {

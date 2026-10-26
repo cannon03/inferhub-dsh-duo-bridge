@@ -41,6 +41,24 @@ function errorCodeOf(error: unknown): string {
   return 'UNKNOWN';
 }
 
+/**
+ * An assistant turn with no wire-visible content.
+ *
+ * The harness can record a thinking-only assistant reply, whose blocks are all
+ * `reasoning`. On the wire that becomes `{role:"assistant", content:""}`, which
+ * CodeBuddy rejects with 400 "Empty message found"; reasoning is not
+ * model-visible context, so the turn can be left out of the request.
+ */
+function isEmptyAssistantTurn(message: GenerateOptions['messages'][number]): boolean {
+  if (message.role !== 'assistant') return false;
+  return !message.content.some((block) => (block.type === 'text' ? block.text.length > 0 : block.type !== 'reasoning'));
+}
+
+function dropEmptyAssistantTurns(messages: GenerateOptions['messages']): GenerateOptions['messages'] {
+  const kept = messages.filter((message) => !isEmptyAssistantTurn(message));
+  return kept.length === messages.length ? messages : kept;
+}
+
 /** A terminal error finish delivered as a chunk (served, but failed). */
 function errorFinishOf(chunk: StreamChunk): LlmFailure | undefined {
   if (chunk.type !== 'finish') return undefined;
@@ -143,13 +161,14 @@ export class PoolFailoverAdapter {
     const route = base.provider;
     const pool = this.deps.poolFor(route);
     const list = this.candidates(route, selected, pool, this.deps.eligibleModels(route));
+    const messages = dropEmptyAssistantTurns(base.messages);
     const tried: { model: string; code: string; message: string }[] = [];
     for (const candidate of list) {
       let yielded = false;
       let content = false;
       let swallowed = false;
       try {
-        for await (const chunk of this.deps.inner.stream({ ...base, model: candidate })) {
+        for await (const chunk of this.deps.inner.stream({ ...base, messages, model: candidate })) {
           yielded = true;
           const terminalError = errorFinishOf(chunk);
           if (terminalError !== undefined) {
